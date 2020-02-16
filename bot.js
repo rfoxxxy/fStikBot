@@ -1,9 +1,10 @@
 const path = require('path')
 const Telegraf = require('telegraf')
+const session = require('telegraf/session')
 const rateLimit = require('telegraf-ratelimit')
 const I18n = require('telegraf-i18n')
 const {
-  db,
+  db
 } = require('./database')
 const {
   handleStart,
@@ -15,72 +16,72 @@ const {
   handleHidePack,
   handleRestorePack,
   handleCopyPack,
-  handleLanguage,
-  handleMessaging,
+  handleLanguage
+  // handleMessaging
 } = require('./handlers')
 const scanes = require('./scanes')
-
 
 global.startDate = new Date()
 
 // init bot
-const bot = new Telegraf(process.env.BOT_TOKEN)
-
-bot.use((ctx, next) => {
-  ctx.ms = new Date()
-  return next()
+const bot = new Telegraf(process.env.BOT_TOKEN, {
+  telegram: {
+    webhookReply: false
+  }
 })
 
 // I18n settings
 const { match } = I18n
 const i18n = new I18n({
   directory: path.resolve(__dirname, 'locales'),
-  defaultLanguage: 'ru',
+  defaultLanguage: 'ru'
 })
 
 // I18n middleware
-bot.use(i18n.middleware())
+bot.use(i18n)
 
 // rate limit
 const limitConfig = {
   window: 300,
   limit: 1,
-  onLimitExceeded: (ctx) => ctx.reply(ctx.i18n.t('ratelimit')),
+  onLimitExceeded: (ctx) => ctx.reply(ctx.i18n.t('ratelimit'))
 }
 
 bot.use(rateLimit(limitConfig))
 
+// error handling
+bot.catch((error, ctx) => {
+  console.error(`error for ${ctx.updateType}`, error)
+})
+
 // bot config
 bot.context.config = require('./config.json')
-
-// get bot username
-bot.telegram.getMe().then((botInfo) => {
-  bot.options.username = botInfo.username
-})
 
 // db connect
 bot.context.db = db
 
 // use session
-bot.use(Telegraf.session())
+bot.use(session({ ttl: 60 * 5 }))
 
 // response time logger
 bot.use(async (ctx, next) => {
+  const ms = new Date()
+
   if (ctx.from) {
     if (!ctx.session.user) {
       ctx.session.user = await db.User.updateData(ctx.from)
-    }
-    else {
+    } else {
       db.User.updateData(ctx.from).then((user) => {
         ctx.session.user = user
       })
     }
   }
   if (ctx.session.user && ctx.session.user.locale) ctx.i18n.locale(ctx.session.user.locale)
-  await next(ctx)
-  const ms = new Date() - ctx.ms
-
-  console.log('Response time %sms', ms)
+  if (ctx.callbackQuery) ctx.state.answerCbQuery = []
+  return next(ctx).then(() => {
+    if (ctx.callbackQuery) ctx.answerCbQuery(...ctx.state.answerCbQuery)
+    console.log('Response time %sms', new Date() - ms)
+  })
 })
 
 // scene
@@ -122,11 +123,22 @@ bot.on('successful_payment', handleDonate)
 // any message
 bot.on('message', handleStart)
 
-// error handling
-bot.catch((error) => {
-  console.log('Oops', error)
-})
-
 // start bot
-bot.launch()
-console.log('bot start')
+db.connection.once('open', async () => {
+  console.log('Connected to MongoDB')
+  if (process.env.BOT_DOMAIN) {
+    bot.launch({
+      webhook: {
+        domain: process.env.BOT_DOMAIN,
+        hookPath: `/fStikBot:${process.env.BOT_TOKEN}`,
+        port: process.env.WEBHOOK_PORT || 2500
+      }
+    }).then(() => {
+      console.log('bot start webhook')
+    })
+  } else {
+    bot.launch().then(() => {
+      console.log('bot start polling')
+    })
+  }
+})
